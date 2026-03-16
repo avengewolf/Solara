@@ -1,6 +1,5 @@
 const API_BASE_URL = "https://music-api.gdstudio.xyz/api.php";
-const KUWO_HOST_PATTERN = /(^|\.)kuwo\.cn$/i;
-const SAFE_RESPONSE_HEADERS = ["content-type", "cache-control", "accept-ranges", "content-length", "content-range", "etag", "last-modified", "expires"];
+const SAFE_RESPONSE_HEADERS = ["content-type", "cache-control", "accept-ranges", "content-length", "content-range", "etag", "last-modified", "expires", "content-disposition"];
 
 function createCorsHeaders(init?: Headers): Headers {
   const headers = new Headers();
@@ -15,6 +14,8 @@ function createCorsHeaders(init?: Headers): Headers {
     headers.set("Cache-Control", "no-store");
   }
   headers.set("Access-Control-Allow-Origin", "*");
+  headers.set("Access-Control-Allow-Methods", "GET,HEAD,OPTIONS");
+  headers.set("Access-Control-Allow-Headers", "Range");
   return headers;
 }
 
@@ -30,57 +31,32 @@ function handleOptions(): Response {
   });
 }
 
-function isAllowedKuwoHost(hostname: string): boolean {
-  if (!hostname) return false;
-  return KUWO_HOST_PATTERN.test(hostname);
-}
-
-function normalizeKuwoUrl(rawUrl: string): URL | null {
+async function proxyAudio(targetUrl: string, request: Request): Promise<Response> {
   try {
-    const parsed = new URL(rawUrl);
-    if (!isAllowedKuwoHost(parsed.hostname)) {
-      return null;
+    const init: RequestInit = {
+      method: request.method,
+      headers: {
+        "User-Agent": request.headers.get("User-Agent") ?? "Mozilla/5.0",
+        "Referer": request.url,
+      },
+    };
+
+    const rangeHeader = request.headers.get("Range");
+    if (rangeHeader) {
+      (init.headers as Record<string, string>)["Range"] = rangeHeader;
     }
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      return null;
-    }
-    parsed.protocol = "http:";
-    return parsed;
-  } catch {
-    return null;
+
+    const upstream = await fetch(targetUrl, init);
+    const headers = createCorsHeaders(upstream.headers);
+
+    return new Response(upstream.body, {
+      status: upstream.status,
+      statusText: upstream.statusText,
+      headers,
+    });
+  } catch (error) {
+    return new Response("Proxy error: " + error, { status: 500 });
   }
-}
-
-async function proxyKuwoAudio(targetUrl: string, request: Request): Promise<Response> {
-  const normalized = normalizeKuwoUrl(targetUrl);
-  if (!normalized) {
-    return new Response("Invalid target", { status: 400 });
-  }
-
-  const init: RequestInit = {
-    method: request.method,
-    headers: {
-      "User-Agent": request.headers.get("User-Agent") ?? "Mozilla/5.0",
-      "Referer": "https://www.kuwo.cn/",
-    },
-  };
-
-  const rangeHeader = request.headers.get("Range");
-  if (rangeHeader) {
-    (init.headers as Record<string, string>)["Range"] = rangeHeader;
-  }
-
-  const upstream = await fetch(normalized.toString(), init);
-  const headers = createCorsHeaders(upstream.headers);
-  if (!headers.has("Cache-Control")) {
-    headers.set("Cache-Control", "public, max-age=3600");
-  }
-
-  return new Response(upstream.body, {
-    status: upstream.status,
-    statusText: upstream.statusText,
-    headers,
-  });
 }
 
 async function proxyApiRequest(url: URL, request: Request): Promise<Response> {
@@ -128,7 +104,7 @@ export async function onRequest({ request }: { request: Request }): Promise<Resp
   const target = url.searchParams.get("target");
 
   if (target) {
-    return proxyKuwoAudio(target, request);
+    return proxyAudio(target, request);
   }
 
   return proxyApiRequest(url, request);
